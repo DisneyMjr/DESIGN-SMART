@@ -1,0 +1,95 @@
+name: Publicar Design Smart
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versao do Cargo.toml (por exemplo 0.8.0, use pontos)"
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirmar versao
+        env:
+          REQUESTED: ${{ inputs.version }}
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import os,tomllib
+          from pathlib import Path
+          actual=tomllib.loads(Path('Cargo.toml').read_text())['workspace']['package']['version']
+          want=os.environ['REQUESTED'].strip()
+          print(f'Cargo.toml: {actual} / solicitado: {want}')
+          if want!=actual: raise SystemExit('Versao diferente do Cargo.toml. Use pontos, como 0.8.0.')
+          PYCODE
+  windows:
+    needs: validate
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Install WiX
+        shell: pwsh
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Package Windows
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Arch x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: design-smart-release-windows
+          path: dist/release/*windows-x64*
+          if-no-files-found: error
+  linux:
+    needs: validate
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libx11-dev libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev libfontconfig1-dev libfreetype6-dev libssl-dev libgtk-3-dev libvulkan-dev libgl1-mesa-dev zsync
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Package Linux
+        run: bash packaging/linux/package.sh --formats "appimage deb rpm tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: design-smart-release-linux
+          path: dist/release/Design-Smart-*-linux-*
+          if-no-files-found: error
+  publish:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: design-smart-release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          TAG="v${VERSION}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Stop to avoid silently overwriting assets."
+            exit 1
+          fi
+          gh release create "$TAG" release-assets/* --repo "$REPO" --title "Design Smart $TAG" --notes "Instaladores Windows e Linux do Design Smart."
